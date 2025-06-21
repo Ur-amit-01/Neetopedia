@@ -19,6 +19,8 @@ from bot.utilities.pyrotools import HelpCmd
 # Session storage for temporary state
 user_sessions: Dict[int, Dict[str, Any]] = {}
 
+BOOLEN_CONVERT = {"true": True, "false": False}
+
 @Client.on_message(
     filters.private & PyroFilters.admin() & filters.command(["option", "settings"]),
 )
@@ -26,17 +28,16 @@ user_sessions: Dict[int, Dict[str, Any]] = {}
 async def option_config_cmd(client: Client, message: Message) -> Optional[Message]:
     """Configure database options through an interactive menu."""
     try:
-        # Get current settings safely using __fields__ as in original code
+        # Get current settings safely using model_dump()
         options_configs = options.settings.model_dump()
-        available_fields = options.settings.__fields__
         
-        # Generate buttons only for available fields
+        # Generate buttons for all available settings
         buttons = []
-        for field in available_fields:
+        for key in options_configs:
             buttons.append(
                 [InlineKeyboardButton(
-                    text=f"⚙️ {field}",
-                    callback_data=f"option_view_{field}"
+                    text=f"⚙️ {key}",
+                    callback_data=f"option_view_{key}"
                 )]
             )
         
@@ -91,12 +92,13 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
             
         key = data[0]
         
-        # Verify the key exists in settings using __fields__ as in original
-        if key not in options.settings.__fields__:
+        # Verify the key exists in settings using model_dump()
+        options_configs = options.settings.model_dump()
+        if key not in options_configs:
             await callback.answer("This setting doesn't exist!", show_alert=True)
             return
             
-        current_value = getattr(options.settings, key)
+        current_value = options_configs[key]
         
         if action == "view":
             buttons = [
@@ -114,7 +116,7 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
         if action == "edit":
             user_sessions[user_id] = {"key": key, "original_value": current_value}
             
-            # Handle boolean values as in original BOOLEN_CONVERT
+            # Handle boolean values
             if isinstance(current_value, bool):
                 buttons = [
                     [
@@ -129,7 +131,7 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
                     reply_markup=InlineKeyboardMarkup(buttons)
                 )
             else:
-                # For other values, follow original behavior
+                # For other values
                 await callback.message.edit_text(
                     text=f"✏️ Editing: {key}\nCurrent value: `{current_value}`\n\n"
                          "Please send me the new value for this setting.\n"
@@ -147,7 +149,7 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
                 await callback.answer("Invalid data!", show_alert=True)
                 return
                 
-            # Handle value conversion as in original code
+            # Handle value conversion
             value_str = data[1]
             try:
                 if value_str.isdigit():
@@ -192,7 +194,7 @@ async def option_value_handler(client: Client, message: Message):
     new_value = message.text
     
     try:
-        # Handle message reply case as in original code
+        # Handle message reply case
         if message.reply_to_message:
             values = message.reply_to_message.text.markdown if message.reply_to_message.text is not None else None
             if not values or not values.isdigit():
@@ -200,7 +202,7 @@ async def option_value_handler(client: Client, message: Message):
                 values = str(copyied_mssg.id if isinstance(copyied_mssg, Message) else values)
             change_value = values
         else:
-            # Handle value conversion as in original code
+            # Handle value conversion
             if new_value.isdigit():
                 change_value = int(new_value)
             else:
