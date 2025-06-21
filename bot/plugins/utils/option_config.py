@@ -126,7 +126,7 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
             
             await callback.message.edit_text(
                 text=f"✏️ Editing: {key}\nCurrent value: {current_value}\n\nSelect new value:",
-                reply_markup=InlineKeyboardMarkup(buttons)
+                reply_markup=InlineKeyboardMarkup(buttons))
             
         elif isinstance(current_value, int):
             # Suggest common increments for numbers
