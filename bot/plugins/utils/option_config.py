@@ -21,6 +21,11 @@ user_sessions: Dict[int, Dict[str, Any]] = {}
 
 BOOLEN_CONVERT = {"true": True, "false": False}
 
+def get_settings_dict():
+    """Safe way to get all settings as a dictionary"""
+    return {field: getattr(options.settings, field) 
+            for field in options.settings.__fields__}
+
 @Client.on_message(
     filters.private & PyroFilters.admin() & filters.command(["option", "settings"]),
 )
@@ -28,19 +33,18 @@ BOOLEN_CONVERT = {"true": True, "false": False}
 async def option_config_cmd(client: Client, message: Message) -> Optional[Message]:
     """Configure database options through an interactive menu."""
     try:
-        # Get current settings safely using the Pydantic model
-        settings_dict = options.settings.dict()
+        settings_dict = get_settings_dict()
         
         # Generate buttons for all available settings
         buttons = []
-        for key in settings_dict:
-            current_value = settings_dict[key]
+        for field in options.settings.__fields__:
+            current_value = settings_dict[field]
             display_value = str(current_value)[:20] + "..." if len(str(current_value)) > 20 else str(current_value)
             
             buttons.append(
                 [InlineKeyboardButton(
-                    text=f"⚙️ {key}: {display_value}",
-                    callback_data=f"option_view_{key}"
+                    text=f"⚙️ {field}: {display_value}",
+                    callback_data=f"option_view_{field}"
                 )]
             )
         
@@ -96,7 +100,7 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
         key = data[0]
         
         # Verify the key exists in settings
-        settings_dict = options.settings.dict()
+        settings_dict = get_settings_dict()
         if key not in settings_dict:
             await callback.answer("This setting doesn't exist!", show_alert=True)
             return
@@ -130,7 +134,7 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
                 ]
                 
                 await callback.message.edit_text(
-                    text=f"✏️ Editing: {key}\nCurrent value: {current_value}\n\nSelect new value:",
+                    text=f"✏️ Editing: {key}\nCurrent value: {current_value}",
                     reply_markup=InlineKeyboardMarkup(buttons)
                 )
             elif isinstance(current_value, (int, float)):
@@ -145,10 +149,9 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
                 ]
                 
                 await callback.message.edit_text(
-                    text=f"✏️ Editing: {key}\nCurrent value: {current_value}\n\nSelect adjustment:",
+                    text=f"✏️ Editing: {key}\nCurrent value: {current_value}",
                     reply_markup=InlineKeyboardMarkup(buttons))
             else:
-                # For strings and other types
                 await callback.message.edit_text(
                     text=f"✏️ Editing: {key}\nCurrent value: `{current_value}`\n\n"
                          "Please send me the new value for this setting.\n"
@@ -189,7 +192,6 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
             
     except Exception as e:
         await callback.answer(f"Error: {str(e)}", show_alert=True)
-        raise
 
 @Client.on_message(
     filters.private & PyroFilters.admin() & ~filters.command(["option", "settings", "cancel"])
@@ -232,7 +234,7 @@ async def option_value_handler(client: Client, message: Message):
                 change_value = new_value
         
         await options.update_settings(key=key, value=change_value)
-        updated_value = options.settings.dict()[key]
+        updated_value = get_settings_dict()[key]
         
         await message.reply(
             text=f"✅ Successfully updated:\n**{key}** = `{updated_value}`",
@@ -259,4 +261,4 @@ HelpCmd.set_help(
     allow_global=False,
     allow_non_admin=False,
     alias=["settings"],
-        )
+)
