@@ -28,15 +28,18 @@ BOOLEN_CONVERT = {"true": True, "false": False}
 async def option_config_cmd(client: Client, message: Message) -> Optional[Message]:
     """Configure database options through an interactive menu."""
     try:
-        # Get current settings safely using model_dump()
-        options_configs = options.settings.model_dump()
+        # Get current settings safely using the Pydantic model
+        settings_dict = options.settings.dict()
         
         # Generate buttons for all available settings
         buttons = []
-        for key in options_configs:
+        for key in settings_dict:
+            current_value = settings_dict[key]
+            display_value = str(current_value)[:20] + "..." if len(str(current_value)) > 20 else str(current_value)
+            
             buttons.append(
                 [InlineKeyboardButton(
-                    text=f"⚙️ {key}",
+                    text=f"⚙️ {key}: {display_value}",
                     callback_data=f"option_view_{key}"
                 )]
             )
@@ -92,13 +95,13 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
             
         key = data[0]
         
-        # Verify the key exists in settings using model_dump()
-        options_configs = options.settings.model_dump()
-        if key not in options_configs:
+        # Verify the key exists in settings
+        settings_dict = options.settings.dict()
+        if key not in settings_dict:
             await callback.answer("This setting doesn't exist!", show_alert=True)
             return
             
-        current_value = options_configs[key]
+        current_value = settings_dict[key]
         
         if action == "view":
             buttons = [
@@ -107,7 +110,7 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
             ]
             
             await callback.message.edit_text(
-                text=f"⚙️ **{key}**\n\nCurrent value: `{current_value}`",
+                text=f"⚙️ **{key}**\n\nCurrent value: `{current_value}`\nType: {type(current_value).__name__}",
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
             await callback.answer()
@@ -120,8 +123,8 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
             if isinstance(current_value, bool):
                 buttons = [
                     [
-                        InlineKeyboardButton("✅ True", callback_data=f"option_save_{key}_True"),
-                        InlineKeyboardButton("❌ False", callback_data=f"option_save_{key}_False")
+                        InlineKeyboardButton("✅ Set True", callback_data=f"option_save_{key}_True"),
+                        InlineKeyboardButton("❌ Set False", callback_data=f"option_save_{key}_False")
                     ],
                     [InlineKeyboardButton("🔙 Cancel", callback_data=f"option_view_{key}")]
                 ]
@@ -130,8 +133,22 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
                     text=f"✏️ Editing: {key}\nCurrent value: {current_value}\n\nSelect new value:",
                     reply_markup=InlineKeyboardMarkup(buttons)
                 )
+            elif isinstance(current_value, (int, float)):
+                buttons = [
+                    [
+                        InlineKeyboardButton("-10", callback_data=f"option_save_{key}_{current_value-10}"),
+                        InlineKeyboardButton("-1", callback_data=f"option_save_{key}_{current_value-1}"),
+                        InlineKeyboardButton("+1", callback_data=f"option_save_{key}_{current_value+1}"),
+                        InlineKeyboardButton("+10", callback_data=f"option_save_{key}_{current_value+10}"),
+                    ],
+                    [InlineKeyboardButton("🔙 Cancel", callback_data=f"option_view_{key}")]
+                ]
+                
+                await callback.message.edit_text(
+                    text=f"✏️ Editing: {key}\nCurrent value: {current_value}\n\nSelect adjustment:",
+                    reply_markup=InlineKeyboardMarkup(buttons))
             else:
-                # For other values
+                # For strings and other types
                 await callback.message.edit_text(
                     text=f"✏️ Editing: {key}\nCurrent value: `{current_value}`\n\n"
                          "Please send me the new value for this setting.\n"
@@ -203,17 +220,22 @@ async def option_value_handler(client: Client, message: Message):
             change_value = values
         else:
             # Handle value conversion
-            if new_value.isdigit():
-                change_value = int(new_value)
+            if isinstance(current_value, bool):
+                change_value = new_value.lower() in ("true", "yes", "1", "on")
+            elif isinstance(current_value, (int, float)):
+                try:
+                    change_value = type(current_value)(new_value)
+                except ValueError:
+                    await message.reply("Please enter a valid number", quote=True)
+                    return
             else:
-                change_value = BOOLEN_CONVERT.get(new_value.lower(), new_value)
+                change_value = new_value
         
-        update = await options.update_settings(key=key, value=change_value)
-        options_configs = update.model_dump()
-        format_options = "\n".join(f"**{k}** ```\n{v}```" for k, v in options_configs.items())
+        await options.update_settings(key=key, value=change_value)
+        updated_value = options.settings.dict()[key]
         
         await message.reply(
-            text=f"Updated:\n{format_options}\n\n__Note: if you see number instead of text it means it set a message to copy (this happens if you use reply to a message while setting the option key)__",
+            text=f"✅ Successfully updated:\n**{key}** = `{updated_value}`",
             quote=True,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 Back to Menu", callback_data="option_back_")]
@@ -222,7 +244,7 @@ async def option_value_handler(client: Client, message: Message):
         user_sessions.pop(user_id, None)
     except InvalidValueError:
         await message.reply(
-            text="Please provide an existing key with int or digit for int value and str for str values",
+            text="Invalid value for this setting type!",
             quote=True
         )
     except Exception as e:
@@ -237,4 +259,4 @@ HelpCmd.set_help(
     allow_global=False,
     allow_non_admin=False,
     alias=["settings"],
-)
+        )
