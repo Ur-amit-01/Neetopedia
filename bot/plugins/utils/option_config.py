@@ -1,8 +1,14 @@
 from inspect import cleandoc
+from typing import Optional
 
 from pyrogram import filters
 from pyrogram.client import Client
-from pyrogram.types import Message
+from pyrogram.types import (
+    Message,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+)
 
 from bot.config import config
 from bot.options import InvalidValueError, options
@@ -10,73 +16,143 @@ from bot.utilities.helpers import RateLimiter
 from bot.utilities.pyrofilters import PyroFilters
 from bot.utilities.pyrotools import HelpCmd
 
-MISSING_ARGUMENT = 2
-BOOLEN_CONVERT = {"true": True, "false": False}
-
+# Session storage for temporary state
+user_sessions = {}
 
 @Client.on_message(
     filters.private & PyroFilters.admin() & filters.command(["option", "settings"]),
 )
 @RateLimiter.hybrid_limiter(func_count=1)
-async def option_config_cmd(client: Client, message: Message) -> Message | None:  # noqa: ARG001
-    """Use to configure database options.
-
-    **Usage:**
-        /option key new_value
-        /option key [reply to a message]
-
-    **Example:**
-        /option AUTO_DELETE_SECONDS 600
-        /option FORCE_SUB_MESSAGE: reply to a message.
+async def option_config_cmd(client: Client, message: Message) -> Optional[Message]:
+    """Configure database options through an interactive menu.
+    
+    **Usage:** Just send /option or /settings to see available options.
     """
-
-    cmd = message.command
-
-    if not cmd[1:]:
-        options_configs = options.settings.model_dump()
-        format_options = "\n".join(f"**{key}** ```\n{value}```" for key, value in options_configs.items())
-        func_doc = option_config_cmd.__doc__
-        return await message.reply(
-            text=f"{format_options}\n\n{cleandoc(func_doc) if func_doc else ''}",
-            quote=True,
+    # Generate buttons for all settings
+    buttons = []
+    options_configs = options.settings.model_dump()
+    
+    for key in options_configs:
+        buttons.append(
+            [InlineKeyboardButton(
+                text=f"{key}: {options_configs[key]}",
+                callback_data=f"option_edit_{key}"
+            )]
         )
+    
+    # Add a close button
+    buttons.append([InlineKeyboardButton("❌ Close", callback_data="option_close")])
+    
+    return await message.reply(
+        text="⚙️ **Settings Menu**\n\nSelect an option to edit:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        quote=True
+    )
 
-    key = cmd[1].upper()
+@Client.on_callback_query(filters.regex(r"^option_(edit|close|save|cancel)_"))
+async def option_callback_handler(client: Client, callback: CallbackQuery):
+    action, *data = callback.data.split("_")[1:]
+    user_id = callback.from_user.id
+    
+    if action == "close":
+        await callback.message.delete()
+        await callback.answer("Settings menu closed")
+        return
+    
+    if action == "cancel":
+        if user_id in user_sessions:
+            del user_sessions[user_id]
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Cancelled")
+        return
+    
+    if action == "edit":
+        key = data[0]
+        current_value = getattr(options.settings, key)
+        
+        # Store the editing state
+        user_sessions[user_id] = {"key": key, "original_value": current_value}
+        
+        # Create buttons for boolean values if applicable
+        if isinstance(current_value, bool):
+            buttons = [
+                [
+                    InlineKeyboardButton("✅ True", callback_data=f"option_save_{key}_True"),
+                    InlineKeyboardButton("❌ False", callback_data=f"option_save_{key}_False")
+                ],
+                [InlineKeyboardButton("🔙 Cancel", callback_data="option_cancel_")]
+            ]
+            
+            await callback.message.edit_text(
+                text=f"⚙️ Editing: {key}\nCurrent value: {current_value}\n\nSelect new value:",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+        else:
+            # For non-boolean values, ask user to input new value
+            await callback.message.edit_text(
+                text=f"⚙️ Editing: {key}\nCurrent value: `{current_value}`\n\n"
+                     "Please send me the new value for this setting.\n"
+                     "Type /cancel to abort.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Cancel", callback_data="option_cancel_")]
+                ])
+            )
+        
+        await callback.answer()
+        return
+    
+    if action == "save":
+        key = data[0]
+        new_value = eval(data[1])  # Safe here because we control the possible values
+        
+        try:
+            update = await options.update_settings(key=key, value=new_value)
+            await callback.message.edit_text(
+                text=f"✅ Successfully updated:\n**{key}** = `{new_value}`",
+                reply_markup=None
+            )
+            if user_id in user_sessions:
+                del user_sessions[user_id]
+            await callback.answer("Setting updated!")
+        except InvalidValueError:
+            await callback.answer("Invalid value for this setting!", show_alert=True)
+        return
 
-    if len(cmd) == MISSING_ARGUMENT and not message.reply_to_message:
-        return await message.reply(text=f"missing arguments:\n{option_config_cmd.__doc__}", quote=True)
-
-    if key not in options.settings.__fields__:
-        return await message.reply("Please use a valid key to edit")
-
-    if message.reply_to_message:
-        values = message.reply_to_message.text.markdown if message.reply_to_message.text is not None else None
-        if not values or not values.isdigit():
-            copyied_mssg = await message.reply_to_message.copy(chat_id=config.BACKUP_CHANNEL)
-            values = str(copyied_mssg.id if isinstance(copyied_mssg, Message) else values)
-    else:
-        # messages next to option command.
-        values = (message.text.markdown.split(maxsplit=2)[2:])[0].lstrip()
-
+@Client.on_message(
+    filters.private & PyroFilters.admin() & ~filters.command(["option", "settings", "cancel"])
+)
+async def option_value_handler(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    if user_id not in user_sessions:
+        return
+    
+    if message.text and message.text.startswith("/cancel"):
+        await message.reply("Setting update cancelled.")
+        if user_id in user_sessions:
+            del user_sessions[user_id]
+        return
+    
+    session = user_sessions[user_id]
+    key = session["key"]
+    new_value = message.text
+    
+    # Try to convert to int if possible
+    if new_value.isdigit():
+        new_value = int(new_value)
+    
     try:
-        change_value = int(values) if values.isdigit() else BOOLEN_CONVERT.get(values.lower(), values)
-
-        update = await options.update_settings(key=key, value=change_value)
-        options_configs = update.model_dump()
-        format_options = "\n".join(f"**{key}** ```\n{value}```" for key, value in options_configs.items())
-
-        final_message = await message.reply(
-            text=f"Updated:\n{format_options}\n\n__Note: if you see number instead of text it means it set a message to copy (this happens if you use reply to a message while setting the option key)__",  # noqa: E501
-            quote=True,
+        update = await options.update_settings(key=key, value=new_value)
+        await message.reply(
+            text=f"✅ Successfully updated:\n**{key}** = `{new_value}`",
+            quote=True
         )
+        del user_sessions[user_id]
     except InvalidValueError:
-        final_message = await message.reply(
-            text="Please provide an existing key with int or digit for int value and str for str values",
-            quote=True,
+        await message.reply(
+            text="❌ Invalid value for this setting! Please try again or /cancel",
+            quote=True
         )
-
-    return final_message
-
 
 HelpCmd.set_help(
     command="option",
