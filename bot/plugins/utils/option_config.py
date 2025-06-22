@@ -1,5 +1,6 @@
 from inspect import cleandoc
 from typing import Optional, Dict, Any
+import logging
 
 from pyrogram import filters
 from pyrogram.client import Client
@@ -16,15 +17,20 @@ from bot.utilities.helpers import RateLimiter
 from bot.utilities.pyrofilters import PyroFilters
 from bot.utilities.pyrotools import HelpCmd
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Session storage for temporary state
 user_sessions: Dict[int, Dict[str, Any]] = {}
 
 BOOLEN_CONVERT = {"true": True, "false": False}
 
-def get_settings_dict():
-    """Safe way to get all settings as a dictionary"""
-    return {field: getattr(options.settings, field) 
-            for field in options.settings.__fields__}
+def get_all_settings():
+    """Get all settings with proper case sensitivity"""
+    settings_dict = options.settings.dict()
+    logger.info(f"Available settings: {list(settings_dict.keys())}")
+    return settings_dict
 
 @Client.on_message(
     filters.private & PyroFilters.admin() & filters.command(["option", "settings"]),
@@ -33,20 +39,21 @@ def get_settings_dict():
 async def option_config_cmd(client: Client, message: Message) -> Optional[Message]:
     """Configure database options through an interactive menu."""
     try:
-        settings_dict = get_settings_dict()
+        settings_dict = get_all_settings()
         
         # Generate buttons for all available settings
         buttons = []
-        for field in options.settings.__fields__:
-            current_value = settings_dict[field]
+        for key in settings_dict:
+            current_value = settings_dict[key]
             display_value = str(current_value)[:20] + "..." if len(str(current_value)) > 20 else str(current_value)
             
             buttons.append(
                 [InlineKeyboardButton(
-                    text=f"⚙️ {field}: {display_value}",
-                    callback_data=f"option_view_{field}"
+                    text=f"⚙️ {key}",
+                    callback_data=f"option_view_{key.lower()}"  # Store lowercase in callback
                 )]
             )
+            logger.info(f"Added button for setting: {key}")
         
         # Add control buttons
         buttons.append([
@@ -60,6 +67,7 @@ async def option_config_cmd(client: Client, message: Message) -> Optional[Messag
             quote=True
         )
     except Exception as e:
+        logger.error(f"Error in option_config_cmd: {str(e)}")
         await message.reply(f"❌ Error loading settings: {str(e)}")
         return None
 
@@ -68,6 +76,8 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
     try:
         action, *data = callback.data.split("_")[1:]
         user_id = callback.from_user.id
+        
+        logger.info(f"Callback received - action: {action}, data: {data}")
         
         if action == "close":
             await callback.message.delete()
@@ -97,67 +107,78 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
             await callback.answer("Invalid option!", show_alert=True)
             return
             
-        key = data[0]
+        requested_key = data[0]
+        logger.info(f"Requested key: {requested_key}")
         
-        # Verify the key exists in settings
-        settings_dict = get_settings_dict()
-        if key not in settings_dict:
+        # Get actual settings with original case
+        settings_dict = get_all_settings()
+        
+        # Find matching key (case-insensitive)
+        matching_key = next(
+            (k for k in settings_dict if k.lower() == requested_key.lower()),
+            None
+        )
+        
+        if not matching_key:
+            logger.warning(f"Setting not found: {requested_key}")
             await callback.answer("This setting doesn't exist!", show_alert=True)
             return
             
-        current_value = settings_dict[key]
+        current_value = settings_dict[matching_key]
+        logger.info(f"Found setting: {matching_key} = {current_value}")
         
         if action == "view":
             buttons = [
-                [InlineKeyboardButton("✏️ Edit", callback_data=f"option_edit_{key}")],
+                [InlineKeyboardButton("✏️ Edit", callback_data=f"option_edit_{matching_key.lower()}")],
                 [InlineKeyboardButton("🔙 Back", callback_data="option_back_")]
             ]
             
             await callback.message.edit_text(
-                text=f"⚙️ **{key}**\n\nCurrent value: `{current_value}`\nType: {type(current_value).__name__}",
+                text=f"⚙️ **{matching_key}**\n\nCurrent value: `{current_value}`\nType: {type(current_value).__name__}",
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
             await callback.answer()
             return
         
         if action == "edit":
-            user_sessions[user_id] = {"key": key, "original_value": current_value}
+            user_sessions[user_id] = {"key": matching_key, "original_value": current_value}
             
             # Handle boolean values
             if isinstance(current_value, bool):
                 buttons = [
                     [
-                        InlineKeyboardButton("✅ Set True", callback_data=f"option_save_{key}_True"),
-                        InlineKeyboardButton("❌ Set False", callback_data=f"option_save_{key}_False")
+                        InlineKeyboardButton("✅ Set True", callback_data=f"option_save_{matching_key.lower()}_True"),
+                        InlineKeyboardButton("❌ Set False", callback_data=f"option_save_{matching_key.lower()}_False")
                     ],
-                    [InlineKeyboardButton("🔙 Cancel", callback_data=f"option_view_{key}")]
+                    [InlineKeyboardButton("🔙 Cancel", callback_data=f"option_view_{matching_key.lower()}")]
                 ]
                 
                 await callback.message.edit_text(
-                    text=f"✏️ Editing: {key}\nCurrent value: {current_value}",
+                    text=f"✏️ Editing: {matching_key}\nCurrent value: {current_value}",
                     reply_markup=InlineKeyboardMarkup(buttons)
                 )
             elif isinstance(current_value, (int, float)):
                 buttons = [
                     [
-                        InlineKeyboardButton("-10", callback_data=f"option_save_{key}_{current_value-10}"),
-                        InlineKeyboardButton("-1", callback_data=f"option_save_{key}_{current_value-1}"),
-                        InlineKeyboardButton("+1", callback_data=f"option_save_{key}_{current_value+1}"),
-                        InlineKeyboardButton("+10", callback_data=f"option_save_{key}_{current_value+10}"),
+                        InlineKeyboardButton("-10", callback_data=f"option_save_{matching_key.lower()}_{current_value-10}"),
+                        InlineKeyboardButton("-1", callback_data=f"option_save_{matching_key.lower()}_{current_value-1}"),
+                        InlineKeyboardButton("+1", callback_data=f"option_save_{matching_key.lower()}_{current_value+1}"),
+                        InlineKeyboardButton("+10", callback_data=f"option_save_{matching_key.lower()}_{current_value+10}"),
                     ],
-                    [InlineKeyboardButton("🔙 Cancel", callback_data=f"option_view_{key}")]
+                    [InlineKeyboardButton("🔙 Cancel", callback_data=f"option_view_{matching_key.lower()}")]
                 ]
                 
                 await callback.message.edit_text(
-                    text=f"✏️ Editing: {key}\nCurrent value: {current_value}",
-                    reply_markup=InlineKeyboardMarkup(buttons))
+                    text=f"✏️ Editing: {matching_key}\nCurrent value: {current_value}",
+                    reply_markup=InlineKeyboardMarkup(buttons)
+                )
             else:
                 await callback.message.edit_text(
-                    text=f"✏️ Editing: {key}\nCurrent value: `{current_value}`\n\n"
+                    text=f"✏️ Editing: {matching_key}\nCurrent value: `{current_value}`\n\n"
                          "Please send me the new value for this setting.\n"
                          "Type /cancel to abort.",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔙 Cancel", callback_data=f"option_view_{key}")]
+                        [InlineKeyboardButton("🔙 Cancel", callback_data=f"option_view_{matching_key.lower()}")]
                     ])
                 )
             
@@ -177,9 +198,9 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
                 else:
                     new_value = BOOLEN_CONVERT.get(value_str.lower(), value_str)
                 
-                await options.update_settings(key=key, value=new_value)
+                await options.update_settings(key=matching_key, value=new_value)
                 await callback.message.edit_text(
-                    text=f"✅ Successfully updated:\n**{key}** = `{new_value}`",
+                    text=f"✅ Successfully updated:\n**{matching_key}** = `{new_value}`",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔙 Back to Menu", callback_data="option_back_")]
                     ])
@@ -191,6 +212,7 @@ async def option_callback_handler(client: Client, callback: CallbackQuery):
             return
             
     except Exception as e:
+        logger.error(f"Error in callback handler: {str(e)}")
         await callback.answer(f"Error: {str(e)}", show_alert=True)
 
 @Client.on_message(
@@ -234,7 +256,7 @@ async def option_value_handler(client: Client, message: Message):
                 change_value = new_value
         
         await options.update_settings(key=key, value=change_value)
-        updated_value = get_settings_dict()[key]
+        updated_value = get_all_settings()[key]
         
         await message.reply(
             text=f"✅ Successfully updated:\n**{key}** = `{updated_value}`",
@@ -250,6 +272,7 @@ async def option_value_handler(client: Client, message: Message):
             quote=True
         )
     except Exception as e:
+        logger.error(f"Error in value handler: {str(e)}")
         await message.reply(
             text=f"❌ Error: {str(e)}",
             quote=True
